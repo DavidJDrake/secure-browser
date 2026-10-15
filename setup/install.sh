@@ -79,8 +79,15 @@ cp "$REPO/package.json" "$REPO/package-lock.json" "$INSTALL_DIR/"
     npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) \
   || { echo "    FAILED: npm ci in $INSTALL_DIR (network? lockfile?)"; exit 1; }
 chown -R root:root "$INSTALL_DIR"
+# X (capital) keeps npm's own execute bits on node_modules without making every
+# package file executable; the launcher scripts in bin/ are then set explicitly,
+# because 'login' is written by sed above and starts life with no execute bit.
 chmod -R u=rwX,go=rX "$INSTALL_DIR"
+chmod 755 "$INSTALL_DIR"/bin/*
 chmod 644 "$INSTALL_DIR"/sites.d/*.json 2>/dev/null || true
+for f in login mcp-server secure-browser; do
+  [ -x "$INSTALL_DIR/bin/$f" ] || { echo "    FAILED: $INSTALL_DIR/bin/$f is not executable"; exit 1; }
+done
 echo "    installed, root-owned: bin/, sites.d/, node_modules/ ($(cd "$INSTALL_DIR" && node -p 'require("./node_modules/mcp-tool-gate/package.json").version') gate, $(cd "$INSTALL_DIR" && node -p 'require("./node_modules/@playwright/mcp/package.json").version') @playwright/mcp)."
 echo "    Re-run this script after editing bin/, sites.d/ or package.json."
 
