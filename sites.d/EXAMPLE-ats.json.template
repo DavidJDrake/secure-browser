@@ -1,0 +1,17 @@
+{
+  "_how_to_use": "Copy to <sitename>.json, fill in, then re-run setup/install.sh to publish it to /opt. The registry is deliberately NOT editable by your normal user: a site file controls where a credential gets typed, so it carries the same authority as the credential itself.",
+  "origin": "https://example.wd1.myworkdayjobs.com",
+  "login_url": "https://example.wd1.myworkdayjobs.com/en-US/careers/login",
+  "secrets": {
+    "_note": "1Password references: op://<vault>/<item title>/<field>. The vault must be one the pwagent service account can read (secure-browser). Legacy pass entry paths (no op:// prefix) still work.",
+    "username": "op://secure-browser/Example ATS/username",
+    "password": "op://secure-browser/Example ATS/password"
+  },
+  "selectors": {
+    "user": "input[data-automation-id=email]",
+    "pass": "input[data-automation-id=password]",
+    "submit": "button[data-automation-id=signInSubmitButton]"
+  },
+  "success": "[data-automation-id=applicationsSectionHeading]",
+  "human_signals": ["captcha", "verify", "one-time"]
+}

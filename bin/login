@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""secure-browser login helper. Runs AS the secrets user.
+
+    login --list
+    login <site> [--headed]
+
+Prints exactly one status line and nothing else:
+
+    OK <site>: <detail>
+    FAILED <site>: <reason>
+    NEEDS-HUMAN <site>: <what is being asked>
+
+Guarantees this file exists to provide:
+  * The credential is read from the secret store inside this process and
+    handed straight to page.fill(). It is never printed, logged, returned, or
+    placed in argv. Store = 1Password via `op read` with a service-account
+    token held in this user's home (op:// references), or the legacy local
+    `pass` store for any entry that is not an op:// reference.
+  * Before any credential is typed, the live page origin must equal the origin
+    registered for that site. Anything else aborts. A redirect to an
+    unregistered host is treated as hostile, not as a retry.
+  * The caller names a SITE, never a vault path. Sites come from the read-only
+    registry under the install dir (default /opt/secure-browser/sites.d), which
+    the calling user cannot edit.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+from urllib.parse import urlparse
+
+import os
+
+# Defaults match setup/install.sh. Override with the same variables the
+# installer honours. sudo strips the environment, so in practice these are the
+# values baked into the installed copy; the variables exist for development.
+INSTALL_DIR = pathlib.Path(os.environ.get("SECURE_BROWSER_INSTALL", "/opt/secure-browser"))
+SITES_DIR = INSTALL_DIR / "sites.d"
+PROFILE = pathlib.Path(os.environ.get("SECURE_BROWSER_PROFILE", str(pathlib.Path.home() / ".browser-profile")))
+EXCHANGE = pathlib.Path(os.environ.get("SECURE_BROWSER_EXCHANGE", "/srv/secure-browser-exchange"))
+PASS_TIMEOUT = 20
+OP_TIMEOUT = 40                      # op read goes over the network
+OP_TOKEN_FILE = pathlib.Path.home() / ".config" / "op" / "service-token"
+
+
+class Fail(Exception):
+    """Anything that should end as FAILED, with a reason safe to print."""
+
+
+class NeedsHuman(Exception):
+    """The site is asking for something only the user can supply."""
+
+
+def load_sites() -> dict:
+    if not SITES_DIR.is_dir():
+        raise Fail(f"site registry missing at {SITES_DIR} (re-run setup/install.sh)")
+    sites = {}
+    for f in sorted(SITES_DIR.glob("*.json")):
+        try:
+            d = json.loads(f.read_text())
+        except json.JSONDecodeError as e:
+            raise Fail(f"malformed site file {f.name}: {e}")
+        # "secrets" holds the username/password references. "pass" is the
+        # pre-1Password name for the same block and is still accepted.
+        if "secrets" not in d and "pass" in d:
+            d["secrets"] = d["pass"]
+        for key in ("origin", "login_url", "secrets", "selectors", "success"):
+            if key not in d:
+                raise Fail(f"site file {f.name} is missing '{key}'")
+        for field in ("username", "password"):
+            if field not in d["secrets"]:
+                raise Fail(f"site file {f.name}: 'secrets' is missing '{field}'")
+        sites[f.stem] = d
+    return sites
+
+
+def secret(entry: str) -> str:
+    """Resolve one credential field. Returned to the caller only.
+
+    `op://vault/item/field` references are read from 1Password with the service
+    account token in OP_TOKEN_FILE. Anything else is a legacy `pass` entry.
+    Nothing here echoes the value, and stderr from either tool is deliberately
+    never reproduced: it can quote the reference, and in some failure modes the
+    value.
+    """
+    if entry.startswith("op://"):
+        return op_secret(entry)
+    return pass_secret(entry)
+
+
+def op_secret(ref: str) -> str:
+    """`op read <ref>` with a 1Password service-account token.
+
+    The token lives in this user's home, mode 600, and is placed in the child
+    environment only. It is never printed and never passed in argv.
+    """
+    try:
+        token = OP_TOKEN_FILE.read_text().strip()
+    except FileNotFoundError:
+        raise Fail(f"1Password service-account token missing at {OP_TOKEN_FILE} - "
+                   "re-run: sudo bash setup/install.sh")
+    except OSError:
+        raise Fail(f"1Password service-account token at {OP_TOKEN_FILE} is not readable")
+    if not token:
+        raise Fail(f"1Password service-account token file {OP_TOKEN_FILE} is empty")
+    env = {"OP_SERVICE_ACCOUNT_TOKEN": token,
+           "HOME": str(pathlib.Path.home()),
+           "PATH": "/usr/local/bin:/usr/bin:/bin",
+           "XDG_CONFIG_HOME": str(pathlib.Path.home() / ".config")}
+    try:
+        r = subprocess.run(["op", "read", "--no-newline", ref],
+                           capture_output=True, text=True, timeout=OP_TIMEOUT, env=env)
+    except FileNotFoundError:
+        raise Fail("the 1Password CLI (op) is not installed - re-run: sudo bash setup/install.sh")
+    except subprocess.TimeoutExpired:
+        raise Fail("op read timed out - 1Password unreachable (network) or the CLI is waiting on input")
+    if r.returncode != 0:
+        err = (r.stderr or "").lower()
+        if "isn't an item" in err or "could not find" in err or "not found" in err or "no item" in err \
+                or "isn't a vault" in err or "doesn't have a field" in err or "isn't a field" in err:
+            raise Fail(f"no item or field at '{ref}' - check the vault, item title and field name in 1Password, "
+                       "and that the service account can read that vault")
+        if "401" in err or "unauthorized" in err or "token" in err or "not signed in" in err or "credentials" in err:
+            raise Fail("1Password rejected the service-account token - it was revoked, mistyped, or lacks "
+                       "access to this vault; rotate it and re-run the installer")
+        if "429" in err or "rate limit" in err or "too many requests" in err:
+            raise Fail("1Password rate limit hit for the service account - wait and retry")
+        if "dial tcp" in err or "no such host" in err or "connection refused" in err or "network" in err \
+                or "timeout" in err or "tls" in err:
+            raise Fail("1Password unreachable - network or DNS problem from this machine")
+        raise Fail("op refused the request")
+    value = r.stdout
+    if not value.strip():
+        raise Fail(f"'{ref}' is empty in 1Password")
+    return value.splitlines()[0]
+
+
+def pass_secret(entry: str) -> str:
+    """Legacy: `pass show <entry>` prints the secret on the first line."""
+    try:
+        r = subprocess.run(["pass", "show", entry],
+                           capture_output=True, text=True, timeout=PASS_TIMEOUT)
+    except FileNotFoundError:
+        raise Fail("pass is not installed for this user (sudo apt install -y pass)")
+    except subprocess.TimeoutExpired:
+        raise Fail("pass timed out - gpg-agent may be waiting on a passphrase prompt "
+                   "that an unattended run cannot answer")
+    if r.returncode != 0:
+        err = (r.stderr or "").lower()
+        if "not in the password store" in err or "no such file" in err:
+            raise Fail(f"no entry '{entry}' in the password store - "
+                       f"add it with: sudo -u $(whoami) pass insert {entry}")
+        if "secret key" in err or "decryption failed" in err or "no secret key" in err:
+            raise Fail("the store cannot be decrypted by this user - the GPG key is missing or wrong")
+        if "password-store" in err and "not" in err:
+            raise Fail("password store not initialised - run: pass init <gpg-key-id>")
+        raise Fail("pass refused the request")
+    line = r.stdout.splitlines()
+    if not line or not line[0].strip():
+        raise Fail(f"'{entry}' is empty in the password store")
+    return line[0]
+
+
+def check_secrets(site_name: str, site: dict) -> str:
+    """Prove the store path without a login. Reports lengths only, never values."""
+    parts = []
+    for field in ("username", "password"):
+        ref = site["secrets"][field]
+        v = secret(ref)                 # raises Fail with the diagnosis on any problem
+        kind = "1Password" if ref.startswith("op://") else "pass"
+        parts.append(f"{field} resolved from {kind} ({len(v)} chars)")
+    return f"OK {site_name}: " + "; ".join(parts)
+
+
+def origin_of(url: str) -> str:
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}".lower()
+
+
+def run(site_name: str, site: dict, headed: bool) -> str:
+    try:
+        from playwright.sync_api import sync_playwright, Error as PWError
+    except ImportError:
+        raise Fail("playwright is not installed in this user's venv - re-run installer step 8: "
+                   "sudo apt-get install -y python3-venv && sudo -u <agent user> bash -lc "
+                   "'rm -rf ~/.venv && python3 -m venv ~/.venv && ~/.venv/bin/pip install playwright "
+                   "&& ~/.venv/bin/python3 -m playwright install chromium'")
+
+    PROFILE.mkdir(mode=0o700, exist_ok=True)
+    # One storage-state file for ALL sites. The MCP server loads this same file
+    # at startup (--isolated --storage-state), which is how a login done here
+    # becomes usable by the agent. A context loaded from it and re-saved keeps
+    # every site's cookies, so logging into site B does not drop site A.
+    state = PROFILE / "storage-state.json"
+    expected = site["origin"].lower().rstrip("/")
+    sel = site["selectors"]
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headed)
+        ctx = browser.new_context(storage_state=str(state) if state.exists() else None)
+        page = ctx.new_page()
+        try:
+            page.goto(site["login_url"], wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(3000)
+
+            # Remembered-device interstitial ("We're signing you in" and similar):
+            # the site completes sign-in by itself if the page is left alone.
+            # Give it up to 25 s before deciding anything. No credential involved.
+            for _ in range(10):
+                try:
+                    body = page.locator("body").inner_text(timeout=3000)
+                except PWError:
+                    body = ""
+                if not any(h.lower() in body.lower() for h in site.get("auto_signin_signals", ["signing you in"])):
+                    break
+                page.wait_for_timeout(2500)
+
+            # Signed in = the success selector is on the page OR the site's auth
+            # cookie is set. The cookie check survives site redesigns that break
+            # the selector (sites rebuild their login pages without notice).
+            def signed_in() -> bool:
+                if page.locator(site["success"]).count():
+                    return True
+                cookie = site.get("success_cookie")
+                if cookie:
+                    return any(c.get("name") == cookie and c.get("value") for c in ctx.cookies())
+                return False
+
+            def snapshot(tag: str):
+                shot = EXCHANGE / f"{site_name}-{tag}.png"
+                try:
+                    page.screenshot(path=str(shot))
+                    shot.chmod(0o660)
+                    return shot
+                except (PWError, OSError):
+                    return None
+
+            # already signed in on the reused session?
+            if signed_in():
+                ctx.storage_state(path=str(state))
+                state.chmod(0o600)
+                return f"OK {site_name}: existing session reused, no credential needed"
+
+            # ---- origin gate: nothing is typed before this passes ----
+            actual = origin_of(page.url)
+            if actual != expected:
+                shot = EXCHANGE / f"{site_name}-origin-mismatch.png"
+                try:
+                    page.screenshot(path=str(shot))
+                except PWError:
+                    pass
+                raise Fail(
+                    f"origin mismatch - expected {expected}, got {actual}. "
+                    f"Nothing was typed. Treat as hostile and do not retry blind "
+                    f"(screenshot: {shot})"
+                )
+
+            if not page.locator(sel["user"]).count() or not page.locator(sel["pass"]).count():
+                shot = EXCHANGE / f"{site_name}-no-login-form.png"
+                try:
+                    page.screenshot(path=str(shot))
+                    shot.chmod(0o660)
+                except (PWError, OSError):
+                    shot = None
+                raise NeedsHuman(
+                    "login form not present - the site may be showing a captcha or an interstitial"
+                    + (f" (url: {page.url}; screenshot: {shot})" if shot else f" (url: {page.url})")
+                )
+
+            # Some sites render the form twice, one copy hidden.
+            # 'visible=true' drops the hidden copy; .first satisfies strict mode.
+            # Each step is named so a timeout says WHERE it happened, never what
+            # was being typed.
+            def vis(css):
+                return page.locator(f"{css} >> visible=true").first
+            step, css = "filling the username field", sel["user"]
+            try:
+                vis(css).fill(secret(site["secrets"]["username"]), timeout=20000)
+                step, css = "filling the password field", sel["pass"]
+                vis(css).fill(secret(site["secrets"]["password"]), timeout=20000)   # only place the value exists
+                step, css = "clicking the submit button", sel["submit"]
+                vis(css).click(timeout=20000)
+            except PWError as e:
+                if type(e).__name__ == "TimeoutError":
+                    raise Fail(f"timed out {step}: selector {css!r} matched nothing visible within 20s")
+                raise
+            page.wait_for_timeout(8000)
+
+            # re-check origin after submit before trusting anything on the page
+            if origin_of(page.url) != expected and "challenge" not in page.url.lower():
+                raise Fail(f"post-submit redirect to {origin_of(page.url)} - session not saved")
+
+            if signed_in():
+                ctx.storage_state(path=str(state))
+                state.chmod(0o600)
+                return f"OK {site_name}: signed in, session saved"
+
+            # Give a slow post-login redirect one more chance before judging.
+            page.wait_for_timeout(7000)
+            if signed_in():
+                ctx.storage_state(path=str(state))
+                state.chmod(0o600)
+                return f"OK {site_name}: signed in, session saved"
+
+            shot = snapshot("after-submit")
+            where = f"(url: {page.url}; title: {page.title()!r}" + (f"; screenshot: {shot})" if shot else ")")
+            for pat in site.get("human_signals", ["captcha", "verification", "two-step", "one-time"]):
+                if pat.lower() in (page.content() or "").lower():
+                    raise NeedsHuman(f"site is asking for '{pat}' - a human must complete this once {where}")
+
+            raise Fail(f"login did not reach a signed-in page {where}")
+        finally:
+            browser.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("site", nargs="?")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--check-secrets", action="store_true",
+                    help="resolve the site's credential fields from the store and report only "
+                         "whether each resolved; nothing is typed and no browser is launched")
+    a = ap.parse_args()
+
+    try:
+        sites = load_sites()
+        if a.list:
+            print("sites: " + (", ".join(sorted(sites)) or "(none registered)"))
+            return 0
+        if not a.site:
+            print("FAILED -: no site named. Try --list", file=sys.stderr)
+            return 2
+        if a.site not in sites:
+            print(f"FAILED {a.site}: not in the registry. Known: {', '.join(sorted(sites))}", file=sys.stderr)
+            return 2
+        if a.check_secrets:
+            print(check_secrets(a.site, sites[a.site]))
+            return 0
+        print(run(a.site, sites[a.site], a.headed))
+        return 0
+    except NeedsHuman as e:
+        print(f"NEEDS-HUMAN {a.site}: {e}", file=sys.stderr)
+        return 3
+    except Fail as e:
+        print(f"FAILED {a.site or '-'}: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        # Never print the message or a traceback: either can carry page fragments
+        # or the value itself. The exception TYPE is safe and makes this
+        # diagnosable instead of opaque - which is the whole point of having a
+        # taxonomy. Detail goes to a file only the secrets user can read.
+        kind = type(e).__name__
+        try:
+            logp = pathlib.Path.home() / "login-errors.log"
+            with logp.open("a") as fh:
+                import traceback, datetime
+                fh.write(f"\n--- {datetime.datetime.now():%Y-%m-%d %H:%M:%S} {a.site} ---\n")
+                traceback.print_exc(file=fh)
+            logp.chmod(0o600)
+            where = f" (detail: {logp}, readable only by this user)"
+        except OSError:
+            where = ""
+        print(f"FAILED {a.site or '-'}: {kind} in the login helper{where}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

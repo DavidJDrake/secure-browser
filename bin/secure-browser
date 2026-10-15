@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""secure-browser - caller-side CLI. Runs as YOUR user, not the secrets user.
+
+    secure-browser status                 what is installed, what is not
+    secure-browser put <file>             copy a file into the exchange for upload
+    secure-browser ls                     list what is sitting in the exchange
+    secure-browser clean [name|--all]     remove file(s) from the exchange
+    secure-browser login <site> [--headed]  run the helper as the secrets user
+    secure-browser sites                  list registered sites
+
+The exchange is the only directory this user and the browser user share. The
+browser cannot read your project directories, so an upload must be staged here
+first and removed afterwards.
+"""
+from __future__ import annotations
+
+import argparse
+import grp
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+# Defaults match setup/install.sh; override with the same variables.
+EXCHANGE = pathlib.Path(os.environ.get("SECURE_BROWSER_EXCHANGE", "/srv/secure-browser-exchange"))
+INSTALL = pathlib.Path(os.environ.get("SECURE_BROWSER_INSTALL", "/opt/secure-browser"))
+AGENT = os.environ.get("SECURE_BROWSER_AGENT_USER", "pwagent")
+GROUP = os.environ.get("SECURE_BROWSER_GROUP", "browseragent")
+
+
+def red(s): return f"\033[31m{s}\033[0m" if sys.stderr.isatty() else s
+def grn(s): return f"\033[32m{s}\033[0m" if sys.stdout.isatty() else s
+
+
+def in_group_now() -> bool:
+    """Group membership added by install.sh does NOT apply to already-open sessions."""
+    try:
+        gid = grp.getgrnam(GROUP).gr_gid
+    except KeyError:
+        return False
+    return gid in os.getgroups()
+
+
+def preflight(need_exchange=True) -> list[str]:
+    problems = []
+    if not INSTALL.is_dir():
+        problems.append(f"not installed: {INSTALL} missing. Run: sudo bash setup/install.sh")
+    if need_exchange and not EXCHANGE.is_dir():
+        problems.append(f"exchange missing: {EXCHANGE}. Run: sudo bash setup/install.sh")
+    try:
+        grp.getgrnam(GROUP)
+    except KeyError:
+        problems.append(f"group '{GROUP}' does not exist. Run: sudo bash setup/install.sh")
+    else:
+        if not in_group_now():
+            problems.append(
+                f"you are not in '{GROUP}' in THIS shell. install.sh added you, but group "
+                f"membership only applies to new sessions. Fix: run 'newgrp {GROUP}', or log out and back in."
+            )
+    return problems
+
+
+def cmd_status() -> int:
+    print(f"install dir : {'present' if INSTALL.is_dir() else 'MISSING'}  ({INSTALL})")
+    print(f"exchange    : {'present' if EXCHANGE.is_dir() else 'MISSING'}  ({EXCHANGE})")
+    try:
+        grp.getgrnam(GROUP); g = "exists"
+    except KeyError:
+        g = "MISSING"
+    print(f"group       : {g}; active in this shell: {'yes' if in_group_now() else 'NO (run newgrp)'}")
+    try:
+        import pwd; pwd.getpwnam(AGENT); print(f"agent user  : {AGENT} exists")
+    except KeyError:
+        print(f"agent user  : {AGENT} MISSING")
+    sites = sorted((INSTALL / "sites.d").glob("*.json")) if (INSTALL / "sites.d").is_dir() else []
+    print(f"sites       : {', '.join(s.stem for s in sites) or '(none registered)'}")
+    if EXCHANGE.is_dir():
+        try:
+            n = list(EXCHANGE.iterdir())
+            print(f"staged files: {len(n)}" + (f"  -> {', '.join(f.name for f in n[:5])}" if n else ""))
+        except PermissionError:
+            print("staged files: PERMISSION DENIED (not in group in this shell)")
+    for p in preflight(need_exchange=False):
+        print(red("  ! " + p))
+    return 0
+
+
+def cmd_put(path: str) -> int:
+    src = pathlib.Path(path).expanduser().resolve()
+    if not src.is_file():
+        print(red(f"no such file: {src}"), file=sys.stderr); return 1
+    if (bad := preflight()):
+        for p in bad: print(red("! " + p), file=sys.stderr)
+        return 1
+    dst = EXCHANGE / src.name
+    if dst.exists():
+        print(red(f"{dst.name} is already staged. Use a different name or run: secure-browser clean {dst.name}"),
+              file=sys.stderr)
+        return 1
+    try:
+        shutil.copy2(src, dst)
+        os.chmod(dst, 0o660)
+    except PermissionError:
+        print(red(f"permission denied writing to {EXCHANGE}. Are you in '{GROUP}' in this shell? Run: newgrp {GROUP}"),
+              file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(red(f"could not stage the file: {e.strerror}"), file=sys.stderr); return 1
+    print(grn(str(dst)))
+    print(f"  upload from this path, then: secure-browser clean {dst.name}", file=sys.stderr)
+    return 0
+
+
+def cmd_ls() -> int:
+    if not EXCHANGE.is_dir():
+        print(red("exchange missing; run the installer"), file=sys.stderr); return 1
+    try:
+        files = sorted(EXCHANGE.iterdir())
+    except PermissionError:
+        print(red(f"permission denied. Run: newgrp {GROUP}"), file=sys.stderr); return 1
+    if not files:
+        print("(exchange is empty)"); return 0
+    for f in files:
+        try: size = f.stat().st_size
+        except OSError: size = 0
+        print(f"{size:>10,}  {f.name}")
+    return 0
+
+
+def cmd_clean(name: str | None, all_: bool) -> int:
+    if not EXCHANGE.is_dir():
+        print(red("exchange missing"), file=sys.stderr); return 1
+    try:
+        targets = list(EXCHANGE.iterdir()) if all_ else [EXCHANGE / name]
+    except PermissionError:
+        print(red(f"permission denied. Run: newgrp {GROUP}"), file=sys.stderr); return 1
+    removed = 0
+    for t in targets:
+        if not t.exists():
+            print(red(f"not staged: {t.name}"), file=sys.stderr); continue
+        try:
+            t.unlink() if t.is_file() else shutil.rmtree(t)
+            removed += 1
+        except PermissionError:
+            print(red(f"permission denied removing {t.name} (written by the browser user with a stricter mode?)"),
+                  file=sys.stderr)
+        except OSError as e:
+            print(red(f"could not remove {t.name}: {e.strerror}"), file=sys.stderr)
+    print(f"removed {removed}")
+    return 0 if removed or not targets else 1
+
+
+def cmd_login(site: str, headed: bool) -> int:
+    if not (INSTALL / "bin" / "login").exists():
+        print(red("not installed; run: sudo bash setup/install.sh"), file=sys.stderr); return 1
+    cmd = ["sudo", "-n", "-u", AGENT, str(INSTALL / "bin" / "login"), site]
+    if headed:
+        cmd.append("--headed")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    if r.returncode and "password is required" in (r.stderr or ""):
+        print(red("sudoers rule not active - re-run the installer"), file=sys.stderr)
+    return r.returncode
+
+
+def cmd_sites() -> int:
+    d = INSTALL / "sites.d"
+    if not d.is_dir():
+        print(red("not installed"), file=sys.stderr); return 1
+    s = sorted(p.stem for p in d.glob("*.json"))
+    print("sites: " + (", ".join(s) or "(none)"))
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="secure-browser", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("status"); sub.add_parser("ls"); sub.add_parser("sites")
+    p = sub.add_parser("put");   p.add_argument("file")
+    c = sub.add_parser("clean"); c.add_argument("name", nargs="?"); c.add_argument("--all", action="store_true")
+    l = sub.add_parser("login"); l.add_argument("site"); l.add_argument("--headed", action="store_true")
+    a = ap.parse_args()
+
+    if a.cmd == "status": return cmd_status()
+    if a.cmd == "put":    return cmd_put(a.file)
+    if a.cmd == "ls":     return cmd_ls()
+    if a.cmd == "clean":
+        if not a.name and not a.all:
+            print(red("name a file or pass --all"), file=sys.stderr); return 2
+        return cmd_clean(a.name, a.all)
+    if a.cmd == "login":  return cmd_login(a.site, a.headed)
+    if a.cmd == "sites":  return cmd_sites()
+    ap.print_help(); return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

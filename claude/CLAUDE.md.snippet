@@ -1,0 +1,30 @@
+## Browser automation and credentials
+
+Any browser work against a site that requires signing in **must** go through the
+**`secure-browser`** skill. Invoke it before the first browser call, not after a failure.
+
+Non-negotiable:
+
+- **Never type a credential.** Do not read a password from a file, an env var, a log, or
+  the user's message and enter it into a page. The login helper resolves secrets in its own
+  process, as a separate OS user, and this session cannot read them.
+- **Never fall back to the unscoped Playwright server.** If `mcp__playwright-secure__*` is
+  unavailable, report that it is down and stop. Falling back writes session cookies into a
+  profile this session can read, which removes the credential boundary without anyone
+  noticing.
+- **Never write a credential into context**: no files, logs, commits, reports, or replies,
+  even one that appears on screen.
+- **Uploads go through the exchange directory.** The browser user cannot read project
+  directories. Copy in with `secure-browser put`, upload, then `secure-browser clean`.
+  Verify the upload from the page, since this failure is silent.
+
+An authenticated session is still the user's own identity. The boundary protects the
+credential; it does not authorise acting as them. Posting, messaging, submitting and
+deleting still follow the user's standing approval rules.
+
+## Secrets generally
+
+Credentials belong in the secrets user's store, never in a repo file, a `settings.local.json`,
+a `CLAUDE.md`, or a memory file. Anything in those is read into context on every session
+whether it is used or not. If you find a secret sitting in one, say so and recommend rotating
+it; it should be assumed compromised rather than quietly moved.

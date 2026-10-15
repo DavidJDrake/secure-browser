@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Playwright MCP server, running as the secrets user.
+#
+# Claude Code spawns this through the sudoers rule and talks to it over stdio.
+# Because the process runs as the secrets user, the browser profile and its
+# cookies live in that user's home at mode 700 - usable by the agent driving the
+# browser, unreadable by the account the agent itself runs as.
+#
+# Anything written for the caller (screenshots, downloads, traces) goes to the
+# shared exchange directory, which is the only path both users can touch.
+set -euo pipefail
+
+PROFILE="${SECURE_BROWSER_PROFILE:-$HOME/.browser-profile}"
+EXCHANGE="${SECURE_BROWSER_EXCHANGE:-/srv/secure-browser-exchange}"
+
+mkdir -p "$PROFILE"; chmod 700 "$PROFILE"
+
+# WSLg: the caller's display, granted to this user by install.sh via xhost.
+export DISPLAY="${DISPLAY:-:0}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}"
+
+# Claude Code spawns this with the CALLER's project directory as cwd, which this
+# user cannot enter (caller's home is 750). npx then fails with EACCES on
+# 'spawn sh'. Move somewhere this user can actually stand before exec.
+cd "$HOME"
+
+# @playwright/mcp needs Node 20+. sudo resets PATH to secure_path, so the
+# caller's nvm node is invisible here; a system-wide Node 20+ is required.
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ "$NODE_MAJOR" -lt 20 ]; then
+  echo "secure-browser mcp-server: node $(node -v 2>/dev/null || echo missing) on PATH for $(id -un); @playwright/mcp needs Node 20+. Install a system-wide Node 20+ (e.g. NodeSource) and re-run setup/install.sh." >&2
+  exit 1
+fi
+
+# Session handoff. The login helper signs in with Playwright-Python and saves a
+# storage-state JSON. A persistent --user-data-dir profile never reads that
+# file, so the two would be separate browsers and a login here would never
+# reach the agent. Run isolated and seed the context from the helper's file
+# instead; the helper rewrites it on every successful run. The file is only
+# read at startup, so a login done mid-session needs a new Claude Code session.
+STATE="$PROFILE/storage-state.json"
+STATE_ARGS=()
+if [ -s "$STATE" ]; then
+  STATE_ARGS=(--storage-state "$STATE")
+else
+  echo "secure-browser mcp-server: no saved session at $STATE - run 'secure-browser login <site>' then start a new session" >&2
+fi
+
+# stdout is the MCP channel - it must carry protocol frames and nothing else.
+# Send every diagnostic to stderr.
+# Pinned. This process runs as the secrets user, so an unpinned "@latest"
+# would be an unreviewed install executing with access to the token.
+MCP_VERSION="${SECURE_BROWSER_MCP_VERSION:-0.0.83}"
+exec npx --yes "@playwright/mcp@${MCP_VERSION}" \
+  --isolated \
+  "${STATE_ARGS[@]}" \
+  --output-dir "$EXCHANGE" \
+  "$@"

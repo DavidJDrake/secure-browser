@@ -1,0 +1,11 @@
+# local state, never committed
+__pycache__/
+*.pyc
+hooks/guard.log
+hooks/mode
+exchange/
+
+# site files are local: they name where a credential gets typed.
+# Only the template ships. Copy it to <site>.json and keep that out of git.
+sites.d/*.json
+!sites.d/*.template
