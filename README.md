@@ -38,11 +38,13 @@ or `op read` the vault. `--caps` only *adds* capabilities and neither the comman
 the config file can remove a core tool (checked against 0.0.83).
 
 So `bin/mcp-server` does not run the server directly. It runs
-[mcp-tool-gate](https://github.com/DavidJDrake/mcp-tool-gate), vendored as
-`bin/mcp-filter.js`, which spawns the server, strips `run_code_unsafe` from every
-`tools/list` reply, and answers any call to it with a JSON-RPC error. The gate is one
-dependency-free file, installed root-owned in `/opt` and executed as the secrets user, so
-the agent can neither call the tool nor edit the rule. Refusals are logged to the secrets
+[mcp-tool-gate](https://github.com/DavidJDrake/mcp-tool-gate), which spawns the server,
+strips `run_code_unsafe` from every `tools/list` reply, and answers any call to it with a
+JSON-RPC error. The gate and the Playwright server are both npm packages pinned in
+`package.json` and `package-lock.json`; the installer runs `npm ci` from that lockfile into
+the root-owned install directory, so the code the secrets user executes is fixed by content
+hash and writable by nobody but root. The launcher never uses `npx`: an npx cache lives in
+the secrets user's home, which that user can write. Refusals are logged to the secrets
 user's home. `browser_evaluate` stays: it runs in the page, not the server process.
 
 A client-side deny (a Claude Code permission rule or the PreToolUse hook) would not do:
@@ -63,7 +65,8 @@ code-execution tool upstream could not reach the vault.
 
 ```
 secure-browser/
-  bin/            login helper, MCP server launcher, tool-filter proxy, caller-side CLI
+  bin/            login helper, MCP server launcher, caller-side CLI
+  package.json    pinned runtime (Playwright MCP server + mcp-tool-gate), installed by the installer
   sites.d/        one JSON per site: login URL, expected origin, selectors, secret refs
   hooks/          PreToolUse guard that denies the unscoped Playwright server
   setup/          privileged installer (run by a human)
@@ -133,10 +136,15 @@ The installer also needs `python3-venv` for the secrets user's Playwright venv a
 it itself.
 
 ```bash
-sudo bash setup/install.sh        # user, group, exchange dir, sudoers rule, /opt copy, op CLI, token
+sudo bash setup/install.sh        # user, group, exchange dir, sudoers rule, /opt copy + npm ci, op CLI, token
 newgrp browseragent               # group membership does NOT apply to already-open shells
 secure-browser status             # should show everything present
 ```
+
+The install step runs `npm ci` inside the install directory from the committed
+`package-lock.json`, so it needs the npm registry once. Upgrading the server or the gate is
+a `package.json` bump, `npm install` in the repo to refresh the lockfile, commit, re-run
+the installer.
 
 Names and paths are overridable with `SECURE_BROWSER_AGENT_USER`, `SECURE_BROWSER_GROUP`,
 `SECURE_BROWSER_INSTALL` and `SECURE_BROWSER_EXCHANGE`, set for the installer and for the

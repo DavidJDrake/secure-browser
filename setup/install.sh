@@ -64,14 +64,25 @@ mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/sites.d"
 sed '1s|.*|#!/home/'"$AGENT_USER"'/.venv/bin/python3|' "$REPO/bin/login" > "$INSTALL_DIR/bin/login"
 head -c 2 "$INSTALL_DIR/bin/login" | grep -q '^#!' || { echo "    FAILED: login shebang rewrite produced a non-#! first line"; exit 1; }
 cp "$REPO/bin/mcp-server"       "$INSTALL_DIR/bin/mcp-server"
-cp "$REPO/bin/mcp-filter.js"    "$INSTALL_DIR/bin/mcp-filter.js"
 cp "$REPO/bin/secure-browser"   "$INSTALL_DIR/bin/secure-browser"
 ln -sf "$INSTALL_DIR/bin/secure-browser" /usr/local/bin/secure-browser
 cp "$REPO"/sites.d/*.json       "$INSTALL_DIR/sites.d/" 2>/dev/null || true
+
+# Runtime packages: the Playwright MCP server and the mcp-tool-gate proxy in
+# front of it. Installed HERE, root-owned, from the committed lockfile, so the
+# code the secrets user executes is pinned by content hash and writable by
+# nobody but root. The launcher never uses npx: an npx cache would live in the
+# secrets user's home, which that user can write.
+[ -s "$REPO/package-lock.json" ] || { echo "    FAILED: package-lock.json missing in the repo; run 'npm install' there and commit it"; exit 1; }
+cp "$REPO/package.json" "$REPO/package-lock.json" "$INSTALL_DIR/"
+( cd "$INSTALL_DIR" && /usr/bin/env -i PATH="$SYS_PATH" HOME=/root \
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error ) \
+  || { echo "    FAILED: npm ci in $INSTALL_DIR (network? lockfile?)"; exit 1; }
 chown -R root:root "$INSTALL_DIR"
-chmod -R 755 "$INSTALL_DIR"
+chmod -R u=rwX,go=rX "$INSTALL_DIR"
 chmod 644 "$INSTALL_DIR"/sites.d/*.json 2>/dev/null || true
-echo "    installed, root-owned. Re-run this script after editing bin/ or sites.d/."
+echo "    installed, root-owned: bin/, sites.d/, node_modules/ ($(cd "$INSTALL_DIR" && node -p 'require("./node_modules/mcp-tool-gate/package.json").version') gate, $(cd "$INSTALL_DIR" && node -p 'require("./node_modules/@playwright/mcp/package.json").version') @playwright/mcp)."
+echo "    Re-run this script after editing bin/, sites.d/ or package.json."
 
 say "4/8  sudoers rule (exact commands only, no wildcards on the binary)"
 cat > "$SUDOERS" <<SUDO

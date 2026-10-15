@@ -1,0 +1,13 @@
+{
+  "name": "secure-browser-runtime",
+  "private": true,
+  "description": "Pinned runtime for the secure-browser MCP launcher. Installed by setup/install.sh into the root-owned install directory with `npm ci`; never run from the repo.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.83",
+    "mcp-tool-gate": "0.1.0"
+  }
+}

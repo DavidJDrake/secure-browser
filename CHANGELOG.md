@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-15
+
+- **Runtime from npm, not vendored.** `mcp-tool-gate` is now a pinned npm dependency
+  alongside `@playwright/mcp` (`package.json` + `package-lock.json`). The installer runs
+  `npm ci` into the root-owned install directory and the launcher executes both from
+  there; `npx` is gone from the runtime path, so no code the secrets user runs lives in a
+  directory that user can write. `bin/mcp-filter.js` removed. One source of truth for the
+  gate: a fix upstream is a version bump here.
+
 ## 2026-10-14
 
 - **Tool filtering.** `bin/mcp-server` now runs the Playwright server behind

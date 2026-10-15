@@ -37,6 +37,18 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
   exit 1
 fi
 
+# Everything this process executes comes from the root-owned install
+# directory: the installer ran `npm ci` there from the committed lockfile, so
+# both the Playwright server and the tool-filter proxy are pinned by content
+# hash and are not writable by this user or the caller. No npx at runtime: an
+# npx cache lives in this user's home, which this user can write.
+INSTALL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GATE="$INSTALL/node_modules/mcp-tool-gate/bin/mcp-tool-gate.js"
+SERVER="$INSTALL/node_modules/@playwright/mcp/cli.js"
+for f in "$GATE" "$SERVER"; do
+  [ -f "$f" ] || { echo "secure-browser mcp-server: missing $f - re-run setup/install.sh (it runs npm ci into $INSTALL)" >&2; exit 1; }
+done
+
 # Session handoff. The login helper signs in with Playwright-Python and saves a
 # storage-state JSON. A persistent --user-data-dir profile never reads that
 # file, so the two would be separate browsers and a login here would never
@@ -53,20 +65,15 @@ fi
 
 # stdout is the MCP channel - it must carry protocol frames and nothing else.
 # Send every diagnostic to stderr.
-# Pinned. This process runs as the secrets user, so an unpinned "@latest"
-# would be an unreviewed install executing with access to the token.
-MCP_VERSION="${SECURE_BROWSER_MCP_VERSION:-0.0.83}"
-
+#
 # Tool filter. The stock server ships browser_run_code_unsafe, which runs Node
 # code inside this process, i.e. as the secrets user, and could read the token
-# or dump the cookie jar. No server flag removes a core tool, so a stdio proxy
-# in front of it hides the tool from tools/list and refuses calls to it. The
-# proxy is a single dependency-free file vendored next to this script and
-# installed root-owned with it. Refusals are logged to this user's home.
-FILTER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp-filter.js"
+# or dump the cookie jar. No server flag removes a core tool, so mcp-tool-gate
+# sits in front of it as a stdio proxy: it hides the tool from tools/list and
+# refuses calls to it. Refusals are logged to this user's home.
 DENY="${SECURE_BROWSER_DENY_TOOLS:-browser_run_code_unsafe}"
-exec node "$FILTER" --deny "$DENY" --log "$HOME/mcp-filter.log" -- \
-  npx --yes "@playwright/mcp@${MCP_VERSION}" \
+exec node "$GATE" --deny "$DENY" --log "$HOME/mcp-filter.log" -- \
+  node "$SERVER" \
   --isolated \
   "${STATE_ARGS[@]}" \
   --output-dir "$EXCHANGE" \
