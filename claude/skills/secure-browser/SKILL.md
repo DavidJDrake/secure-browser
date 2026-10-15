@@ -23,9 +23,10 @@ Drive the browser through the **`mcp__playwright-secure__*`** tools. They run as
 secrets user, so an authenticated session is usable without any credential being visible here.
 
 **Known gap, until the project's README says otherwise:** the secure server exposes
-`browser_run_code_unsafe` and `browser_evaluate`, which execute code as the secrets user.
-Do not use them to read files, environment variables or anything outside the page. Use them
-for page interaction only, and prefer the click, type, snapshot and navigate tools.
+`browser_run_code_unsafe`, which runs Node code as the secrets user. Do not use it to read
+files, environment variables, cookies or anything outside the page. Use it for page
+interaction only, and prefer `browser_evaluate` (page context) and the click, type, snapshot
+and navigate tools. Never pass a path outside the exchange directory to `browser_file_upload`.
 
 ## Rules
 

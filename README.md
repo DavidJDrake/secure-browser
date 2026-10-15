@@ -35,24 +35,34 @@ user's approval gates on outward-facing actions.
 ## Known gap (open as of 2026-10-14)
 
 `bin/mcp-server` launches `@playwright/mcp` as the secrets user. The stock server includes
-`browser_run_code_unsafe` and `browser_evaluate`, which execute code inside the server
-process. That process runs as the secrets user, so a call that reads
+`browser_run_code_unsafe`, which runs arbitrary Node code inside the server process. That
+process runs as the secrets user, so a call that reads
 `~<secrets user>/.config/op/service-token` or `~<secrets user>/.browser-profile/storage-state.json`
-from inside `run_code_unsafe` succeeds. The agent can therefore reach the root secret
-through the one channel the design gives it, and with the token it can `op read` every
-item in the vault the service account was granted.
+from inside `run_code_unsafe` succeeds, and so does `page.context().cookies()`. The agent can
+therefore reach the root secret through the one channel the design gives it, and with the
+token it can `op read` every item in the vault the service account was granted.
+
+Two smaller paths lead the same way. `browser_file_upload` can attach any file under the
+server's workspace root to a form, and the launcher's workspace root is the secrets user's
+home, so the token file is uploadable to any site. And `browser_evaluate` is *not* part of
+this: it runs in the page, not the server process, and cannot read files or HttpOnly
+cookies. An earlier version of this section listed it; that was wrong.
 
 What still holds: the agent's shell, file and search tools run as the calling user and
 cannot read any of those files. The gap was found by the author in a self-audit before
 publishing, not through an incident.
 
-Both tools are in the server's core tool set. As of `@playwright/mcp` 0.0.83, `--caps`
+`run_code_unsafe` is in the server's core tool set. As of `@playwright/mcp` 0.0.83, `--caps`
 only *adds* optional capabilities (vision, pdf, devtools) and neither the command line nor
 the config file can remove a core tool. So the fix is not a flag:
 
-1. **A filtering layer.** Run a thin MCP proxy in front of the server that drops the two
-   tools from `tools/list` and refuses `tools/call` for them, or patch the server's tool
-   table at launch. This is the planned fix.
+1. **A filtering layer.** Run a thin MCP proxy in front of the server that drops
+   `run_code_unsafe` from `tools/list` and refuses `tools/call` for it, installed root-owned
+   and executed as the secrets user like everything else. A client-side deny (a Claude Code
+   permission rule or the PreToolUse hook) is not a substitute: both live in files the
+   calling user, and so the agent, can edit. This is the planned fix. Alongside it, the
+   launcher's working directory moves from the secrets user's home to the exchange
+   directory, which closes the upload path.
 2. **Pin the server version.** Done: `bin/mcp-server` pins `@playwright/mcp`, because an
    unpinned `npx --yes ...@latest` as the secrets user is an unreviewed install executing
    with access to the token.
@@ -60,7 +70,7 @@ the config file can remove a core tool. So the fix is not a flag:
    vault token, so even code execution in the server cannot reach the vault. The login
    helper stays with the token holder. This changes the installer.
 
-Until 1 or 3 lands, the shipped skill tells the agent not to use the two tools for
+Until 1 or 3 lands, the shipped skill tells the agent not to use `run_code_unsafe` for
 anything but page interaction. That is an instruction, not a boundary, and this section
 says so. It goes away when the fix lands.
 
