@@ -64,6 +64,7 @@ mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/sites.d"
 sed '1s|.*|#!/home/'"$AGENT_USER"'/.venv/bin/python3|' "$REPO/bin/login" > "$INSTALL_DIR/bin/login"
 head -c 2 "$INSTALL_DIR/bin/login" | grep -q '^#!' || { echo "    FAILED: login shebang rewrite produced a non-#! first line"; exit 1; }
 cp "$REPO/bin/mcp-server"       "$INSTALL_DIR/bin/mcp-server"
+cp "$REPO/bin/mcp-filter.js"    "$INSTALL_DIR/bin/mcp-filter.js"
 cp "$REPO/bin/secure-browser"   "$INSTALL_DIR/bin/secure-browser"
 ln -sf "$INSTALL_DIR/bin/secure-browser" /usr/local/bin/secure-browser
 cp "$REPO"/sites.d/*.json       "$INSTALL_DIR/sites.d/" 2>/dev/null || true

@@ -20,65 +20,50 @@ that user, so the agent drives an authenticated browser while the calling user, 
 therefore the agent's shell, file and search tools, cannot read the vault token, the
 credentials, or the session cookies.
 
-**What this is meant to buy:** the credential cannot be exfiltrated into a transcript, an
-API, a log, or anything outliving the session.
-
-**What it does not buy today, see the next section:** the stock MCP server exposes tools
-that run arbitrary code *as the secrets user*, so the boundary currently holds against the
-agent's own tools but not against the browser server it is handed. Until that is closed,
-the honest description is: the credential is not visible by default, not unreadable.
+**What this buys:** the credential cannot be exfiltrated into a transcript, an API, a log,
+or anything outliving the session. The server's code-execution tool, which would have
+been the way around that, is removed by a proxy that runs with the server (see "Tool
+filtering").
 
 **What it does not buy by design:** it does not stop the agent doing something undesirable
 *while* driving an authenticated browser. That risk is accepted and controlled by the
 user's approval gates on outward-facing actions.
 
-## Known gap (open as of 2026-10-14)
+## Tool filtering
 
-`bin/mcp-server` launches `@playwright/mcp` as the secrets user. The stock server includes
-`browser_run_code_unsafe`, which runs arbitrary Node code inside the server process. That
-process runs as the secrets user, so a call that reads
-`~<secrets user>/.config/op/service-token` or `~<secrets user>/.browser-profile/storage-state.json`
-from inside `run_code_unsafe` succeeds, and so does `page.context().cookies()`. The agent can
-therefore reach the root secret through the one channel the design gives it, and with the
-token it can `op read` every item in the vault the service account was granted.
+The stock `@playwright/mcp` server includes `browser_run_code_unsafe`, which runs arbitrary
+Node code inside the server process. Here that process is the secrets user, so the tool
+could read the service-account token, dump the cookie jar with `page.context().cookies()`,
+or `op read` the vault. `--caps` only *adds* capabilities and neither the command line nor
+the config file can remove a core tool (checked against 0.0.83).
 
-Two smaller paths lead the same way. `browser_file_upload` can attach any file under the
-server's workspace root to a form, and the launcher's workspace root is the secrets user's
-home, so the token file is uploadable to any site. And `browser_evaluate` is *not* part of
-this: it runs in the page, not the server process, and cannot read files or HttpOnly
-cookies. An earlier version of this section listed it; that was wrong.
+So `bin/mcp-server` does not run the server directly. It runs
+[mcp-tool-gate](https://github.com/DavidJDrake/mcp-tool-gate), vendored as
+`bin/mcp-filter.js`, which spawns the server, strips `run_code_unsafe` from every
+`tools/list` reply, and answers any call to it with a JSON-RPC error. The gate is one
+dependency-free file, installed root-owned in `/opt` and executed as the secrets user, so
+the agent can neither call the tool nor edit the rule. Refusals are logged to the secrets
+user's home. `browser_evaluate` stays: it runs in the page, not the server process.
 
-What still holds: the agent's shell, file and search tools run as the calling user and
-cannot read any of those files. The gap was found by the author in a self-audit before
-publishing, not through an incident.
+A client-side deny (a Claude Code permission rule or the PreToolUse hook) would not do:
+both live in files the calling user, and therefore the agent, can edit.
 
-`run_code_unsafe` is in the server's core tool set. As of `@playwright/mcp` 0.0.83, `--caps`
-only *adds* optional capabilities (vision, pdf, devtools) and neither the command line nor
-the config file can remove a core tool. So the fix is not a flag:
+The launcher also runs with the exchange directory as its working directory rather than
+the secrets user's home. The server treats cwd as the workspace root and
+`browser_file_upload` will attach any file under it, so with `$HOME` as the root the token
+file was uploadable to any site.
 
-1. **A filtering layer.** Run a thin MCP proxy in front of the server that drops
-   `run_code_unsafe` from `tools/list` and refuses `tools/call` for it, installed root-owned
-   and executed as the secrets user like everything else. A client-side deny (a Claude Code
-   permission rule or the PreToolUse hook) is not a substitute: both live in files the
-   calling user, and so the agent, can edit. This is the planned fix. Alongside it, the
-   launcher's working directory moves from the secrets user's home to the exchange
-   directory, which closes the upload path.
-2. **Pin the server version.** Done: `bin/mcp-server` pins `@playwright/mcp`, because an
-   unpinned `npx --yes ...@latest` as the secrets user is an unreviewed install executing
-   with access to the token.
-3. **Split roles.** Run the browser server as a user that holds the cookie file but not the
-   vault token, so even code execution in the server cannot reach the vault. The login
-   helper stays with the token holder. This changes the installer.
-
-Until 1 or 3 lands, the shipped skill tells the agent not to use `run_code_unsafe` for
-anything but page interaction. That is an instruction, not a boundary, and this section
-says so. It goes away when the fix lands.
+**History.** Both paths were found by the author in a self-audit before the first public
+commit, not through an incident, and the README of that commit recorded them as an open
+gap while this fix was built. Remaining optional hardening: run the browser server as a
+third user that holds the cookie file but not the vault token, so that even a future
+code-execution tool upstream could not reach the vault.
 
 ## Layout
 
 ```
 secure-browser/
-  bin/            login helper, MCP server launcher, caller-side CLI
+  bin/            login helper, MCP server launcher, tool-filter proxy, caller-side CLI
   sites.d/        one JSON per site: login URL, expected origin, selectors, secret refs
   hooks/          PreToolUse guard that denies the unscoped Playwright server
   setup/          privileged installer (run by a human)
@@ -92,7 +77,7 @@ secure-browser/
 |---|---|---|
 | Skill | `claude/skills/secure-browser/SKILL.md` | procedures; fires on description match |
 | Instruction | `claude/CLAUDE.md.snippet`, pasted into the project's `CLAUDE.md` | always loaded |
-| Hook | `hooks/guard-playwright.py` | deterministic: denies any Playwright MCP call under the root that is not on the `playwright-secure` server. It guards which server is called, not what that server can run (see "Known gap") |
+| Hook | `hooks/guard-playwright.py` | deterministic: denies any Playwright MCP call under the root that is not on the `playwright-secure` server. It guards which server is called; what that server can run is bounded by the tool filter (see "Tool filtering") |
 
 The hook has three modes in `hooks/mode` (missing file means `warn`):
 

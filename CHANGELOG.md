@@ -2,9 +2,14 @@
 
 ## 2026-10-14
 
-- README corrected: the agent's own tools cannot read the token or cookies, but the
-  Playwright MCP server's code-execution tools run as the secrets user and can. Recorded
-  as a known gap; see README.
+- **Tool filtering.** `bin/mcp-server` now runs the Playwright server behind
+  [mcp-tool-gate](https://github.com/DavidJDrake/mcp-tool-gate) (vendored as
+  `bin/mcp-filter.js`) with `browser_run_code_unsafe` denied, and uses the exchange
+  directory as the workspace root so `browser_file_upload` cannot reach the token file.
+  Closes the gap recorded earlier the same day: the code-execution tool ran as the secrets
+  user and could read the token and the cookie jar, and no server flag could remove it.
+- README corrected twice: first to record that gap honestly, then to drop `browser_evaluate`
+  from it (page context, not server process) and add the upload path.
 - `bin/mcp-server` pins `@playwright/mcp` instead of `@latest`.
 - Paths, user and group names are overridable through `SECURE_BROWSER_*` variables;
   the guard hook no longer hardcodes a home directory.

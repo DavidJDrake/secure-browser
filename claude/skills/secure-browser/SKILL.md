@@ -22,11 +22,11 @@ the normal user and **cannot read them** — that is the point, not an obstacle 
 Drive the browser through the **`mcp__playwright-secure__*`** tools. They run as the
 secrets user, so an authenticated session is usable without any credential being visible here.
 
-**Known gap, until the project's README says otherwise:** the secure server exposes
-`browser_run_code_unsafe`, which runs Node code as the secrets user. Do not use it to read
-files, environment variables, cookies or anything outside the page. Use it for page
-interaction only, and prefer `browser_evaluate` (page context) and the click, type, snapshot
-and navigate tools. Never pass a path outside the exchange directory to `browser_file_upload`.
+The secure server does **not** expose `browser_run_code_unsafe`; a tool-filter proxy removes
+it, because it would run Node code as the secrets user. Do page-side logic with
+`browser_evaluate` (page context) and drive the page with the click, type, snapshot and
+navigate tools. Uploads come only from the exchange directory, which is also the server's
+workspace root.
 
 ## Rules
 

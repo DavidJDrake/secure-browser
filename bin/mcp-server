@@ -23,7 +23,11 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}"
 # Claude Code spawns this with the CALLER's project directory as cwd, which this
 # user cannot enter (caller's home is 750). npx then fails with EACCES on
 # 'spawn sh'. Move somewhere this user can actually stand before exec.
-cd "$HOME"
+#
+# The exchange, not $HOME: the server treats its cwd as the workspace root,
+# and browser_file_upload will attach any file under that root. With $HOME as
+# the root the service-account token would be uploadable to any site.
+cd "$EXCHANGE"
 
 # @playwright/mcp needs Node 20+. sudo resets PATH to secure_path, so the
 # caller's nvm node is invisible here; a system-wide Node 20+ is required.
@@ -52,7 +56,17 @@ fi
 # Pinned. This process runs as the secrets user, so an unpinned "@latest"
 # would be an unreviewed install executing with access to the token.
 MCP_VERSION="${SECURE_BROWSER_MCP_VERSION:-0.0.83}"
-exec npx --yes "@playwright/mcp@${MCP_VERSION}" \
+
+# Tool filter. The stock server ships browser_run_code_unsafe, which runs Node
+# code inside this process, i.e. as the secrets user, and could read the token
+# or dump the cookie jar. No server flag removes a core tool, so a stdio proxy
+# in front of it hides the tool from tools/list and refuses calls to it. The
+# proxy is a single dependency-free file vendored next to this script and
+# installed root-owned with it. Refusals are logged to this user's home.
+FILTER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mcp-filter.js"
+DENY="${SECURE_BROWSER_DENY_TOOLS:-browser_run_code_unsafe}"
+exec node "$FILTER" --deny "$DENY" --log "$HOME/mcp-filter.log" -- \
+  npx --yes "@playwright/mcp@${MCP_VERSION}" \
   --isolated \
   "${STATE_ARGS[@]}" \
   --output-dir "$EXCHANGE" \
