@@ -2,14 +2,16 @@
 
 ## 2026-10-17
 
-- **`secure-browser-add-site`.** Publishing a site file no longer needs the full installer.
-  `sudo secure-browser-add-site sites.d/<site>.json` validates one file (https origin,
-  `login_url` on that origin, `op://` references only, required selectors), shows the
-  origin and references it binds plus any origin or reference change against the
-  published copy, requires typing the site name on the terminal, and writes it
-  root:root 644 atomically. `--remove <site>` unregisters. Installed as a root-owned copy
-  in `/opt/secure-browser/bin/add-site`, linked from `/usr/local/sbin`; not in the NOPASSWD
-  rule. 1Password item changes still need no root step at all.
+- **The 1Password vault is the site registry.** `sites.d/`, the site-file template and the
+  root publishing step are gone. Every Login item in the `secure-browser` vault with an
+  https website is a site; the credential is typed only on that website's host. Adding a
+  site is adding the item, with no install. `bin/login` lists the vault at login time,
+  reads credentials by item ID (renames are harmless), carries built-in knowledge for
+  LinkedIn and all Workday tenants, falls back to generic form detection (including
+  two-step forms), and accepts optional plain-text hint fields on the item. A short-lived
+  `secure-browser-add-site` command was written and dropped in the same day in favour of
+  this. `secure-browser sites`/`status` now ask the helper for the vault listing, and the
+  CLI passes `--check-secrets` through.
 
 ## 2026-10-15
 

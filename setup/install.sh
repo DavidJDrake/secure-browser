@@ -58,17 +58,14 @@ echo "    $EXCHANGE  (2770, setgid, group $SHARE_GROUP)"
 
 say "3/8  installing executables to $INSTALL_DIR (not writable by $CALLER)"
 rm -rf "$INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/sites.d"
+mkdir -p "$INSTALL_DIR/bin"
 # Rewrite the shebang to the agent user's venv. Do NOT use '#' as the sed
 # delimiter here: it swallows the '#' of '#!' and the kernel falls back to sh.
 sed '1s|.*|#!/home/'"$AGENT_USER"'/.venv/bin/python3|' "$REPO/bin/login" > "$INSTALL_DIR/bin/login"
 head -c 2 "$INSTALL_DIR/bin/login" | grep -q '^#!' || { echo "    FAILED: login shebang rewrite produced a non-#! first line"; exit 1; }
 cp "$REPO/bin/mcp-server"       "$INSTALL_DIR/bin/mcp-server"
 cp "$REPO/bin/secure-browser"   "$INSTALL_DIR/bin/secure-browser"
-cp "$REPO/bin/add-site"         "$INSTALL_DIR/bin/add-site"
-ln -sf "$INSTALL_DIR/bin/add-site" /usr/local/sbin/secure-browser-add-site
 ln -sf "$INSTALL_DIR/bin/secure-browser" /usr/local/bin/secure-browser
-cp "$REPO"/sites.d/*.json       "$INSTALL_DIR/sites.d/" 2>/dev/null || true
 
 # Runtime packages: the Playwright MCP server and the mcp-tool-gate proxy in
 # front of it. Installed HERE, root-owned, from the committed lockfile, so the
@@ -86,12 +83,11 @@ chown -R root:root "$INSTALL_DIR"
 # because 'login' is written by sed above and starts life with no execute bit.
 chmod -R u=rwX,go=rX "$INSTALL_DIR"
 chmod 755 "$INSTALL_DIR"/bin/*
-chmod 644 "$INSTALL_DIR"/sites.d/*.json 2>/dev/null || true
 for f in login mcp-server secure-browser; do
   [ -x "$INSTALL_DIR/bin/$f" ] || { echo "    FAILED: $INSTALL_DIR/bin/$f is not executable"; exit 1; }
 done
-echo "    installed, root-owned: bin/, sites.d/, node_modules/ ($(cd "$INSTALL_DIR" && node -p 'require("./node_modules/mcp-tool-gate/package.json").version') gate, $(cd "$INSTALL_DIR" && node -p 'require("./node_modules/@playwright/mcp/package.json").version') @playwright/mcp)."
-echo "    Re-run this script after editing bin/ or package.json. For a site file alone: sudo secure-browser-add-site sites.d/<site>.json"
+echo "    installed, root-owned: bin/, node_modules/ ($(cd "$INSTALL_DIR" && node -p 'require("./node_modules/mcp-tool-gate/package.json").version') gate, $(cd "$INSTALL_DIR" && node -p 'require("./node_modules/@playwright/mcp/package.json").version') @playwright/mcp)."
+echo "    Re-run this script only after editing bin/ or package.json. Sites need no install: they are the Login items in the vault."
 
 say "4/8  sudoers rule (exact commands only, no wildcards on the binary)"
 cat > "$SUDOERS" <<SUDO
@@ -212,11 +208,10 @@ cat <<NEXT
 
 Done. Remaining steps, in order:
 
-  1. In 1Password: vault "secure-browser", one Login item per site with the
-     default username/password fields, and a read-only service account on
-     that vault whose token you pasted above. Each sites.d/<site>.json
-     references its item as op://secure-browser/<item title>/<field>.
-     Nothing passes through the calling session.
+  1. In 1Password: vault "secure-browser" with a read-only service account
+     whose token you pasted above. Every Login item in that vault with an
+     https website is a site: the credential is typed only on that website's
+     host. Adding a site = adding the item. Nothing else, no re-install.
 
   2. Register the MCP server (see README "Registering the server").
 

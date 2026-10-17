@@ -76,22 +76,29 @@ terminal. **Always verify the upload landed** by checking the page, not the exit
 
 ## Adding a site
 
-Add `sites.d/<site>.json` with the login URL, the expected origin, the field selectors, and
-the `op://secure-browser/<item>/<field>` references. Then the user creates that Login item in the
-`secure-browser` vault in 1Password (the vault the service account can read). The user does that
-part — this session cannot write to 1Password.
+There is nothing to add on this side. **A site is a Login item in the `secure-browser`
+vault**: the user creates it with the username, password and the site's website, and it is
+live at the next `secure-browser login`. No file, no install, no sudo. The credential is
+typed only on the host in the item's website field, over https.
 
-Then the user publishes the file with `sudo secure-browser-add-site sites.d/<site>.json` in
-their own terminal (it needs their sudo password and a typed confirmation, so the `!` prompt
-will not work). No full reinstall. Changing or adding a 1Password item alone needs no root
-step: the helper reads 1Password at login time.
+- `secure-browser sites` lists what the helper sees (title slug and allowed hosts), plus any
+  items skipped for lacking an https website.
+- Name a site by slug (`Workday - Pluralsight` -> `workday-pluralsight`), by host
+  (`pluralsight.wd1.myworkdayjobs.com`) or by URL. Host is the least ambiguous.
+- If a login fails because the website field is wrong (e.g. `myworkdayjobs.com` instead of
+  the tenant host), ask the user to set it to the full URL of the page they sign in on.
+- For an unusual site, the user can add plain-text fields to the item: `login_url`,
+  `username_selector`, `password_selector`, `submit_selector`, `success_selector`,
+  `success_cookie`. LinkedIn and every Workday tenant are built in and need none.
+- Creating accounts on a site is the user's job; this session cannot write to 1Password.
 
 ## Errors worth knowing
 
 | Symptom | Cause |
 |---|---|
 | `FAILED: origin mismatch` | the page redirected somewhere unregistered — treat as hostile, do not retry blind |
-| `FAILED: no item or field at 'op://...'` | item missing in 1Password or the service account cannot read that vault; ask the user |
+| `FAILED: no Login item in vault ... Known: ...` | no item has that title or website host; ask the user to add it, or to fix its website field |
+| `FAILED: origin mismatch` before typing | the site redirected off the item's host; if it is legitimate (an SSO host), the user adds that URL to the item's websites |
 | `FAILED: 1Password rejected the service-account token` | token revoked or mis-scoped; the user creates a new one and re-runs the installer |
 | `FAILED: 1Password unreachable` | network; retry later, do not fall back |
 | upload silently does nothing | file was outside `exchange/`, or was cleaned too early |
