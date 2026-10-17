@@ -1,0 +1,200 @@
+#!/usr/bin/python3 -I
+"""secure-browser-add-site - publish ONE site file to the root-owned registry.
+
+    sudo secure-browser-add-site sites.d/<site>.json      add or replace a site
+    sudo secure-browser-add-site --remove <site>          unregister a site
+
+A site file says where a credential gets typed, so publishing one carries the
+same authority as the credential itself. This command is the light path for
+that one step: it validates the file, shows you the origin and the 1Password
+references it binds together, asks you to confirm on the terminal, and copies
+it into the install dir as root. It does not touch bin/, node_modules/, the
+sudoers rule, the token or the agent user; for those, re-run setup/install.sh.
+
+It is deliberately NOT in the NOPASSWD sudoers rule. Your password plus the
+confirmation prompt are the human approval that a credential may be typed at
+that origin. The installed copy lives in root-owned /opt, so the agent session
+cannot edit what runs here. 1Password items need no registration at all: the
+login helper reads them at login time, so adding or changing an item never
+needs this command.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+import tempfile
+from urllib.parse import urlparse
+
+INSTALL_DIR = pathlib.Path("/opt/secure-browser")      # fixed: sudo strips the env anyway
+SITES_DIR = INSTALL_DIR / "sites.d"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+OP_RE = re.compile(r"^op://[^/\s]+/[^/\s][^/]*/[^/\s]+$")
+MAX_BYTES = 16 * 1024
+REQUIRED = ("origin", "login_url", "secrets", "selectors", "success")
+
+
+class Bad(Exception):
+    pass
+
+
+def https_origin(url: str, what: str) -> str:
+    p = urlparse(url)
+    if p.scheme != "https" or not p.hostname:
+        raise Bad(f"{what} must be an https:// URL, got {url!r}")
+    if p.username or p.password:
+        raise Bad(f"{what} must not carry userinfo")
+    return f"https://{p.netloc}".lower()
+
+
+def validate(name: str, raw: bytes) -> dict:
+    if not NAME_RE.match(name):
+        raise Bad(f"site name {name!r}: use lowercase letters, digits and dashes")
+    if len(raw) > MAX_BYTES:
+        raise Bad(f"file is {len(raw)} bytes; a site file is never this big")
+    try:
+        d = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise Bad(f"not valid JSON: {e}")
+    if not isinstance(d, dict):
+        raise Bad("top level must be a JSON object")
+    if "secrets" not in d and "pass" in d:
+        d["secrets"] = d["pass"]
+    for k in REQUIRED:
+        if k not in d:
+            raise Bad(f"missing '{k}'")
+
+    origin = d["origin"]
+    if not isinstance(origin, str):
+        raise Bad("'origin' must be a string")
+    p = urlparse(origin)
+    if p.path not in ("", "/") or p.query or p.fragment:
+        raise Bad(f"'origin' must be scheme://host[:port] only, got {origin!r}")
+    origin = https_origin(origin, "'origin'")
+    if https_origin(d["login_url"], "'login_url'") != origin:
+        raise Bad(f"'login_url' is not on {origin}")
+
+    s = d["secrets"]
+    if not isinstance(s, dict):
+        raise Bad("'secrets' must be an object")
+    for field in ("username", "password"):
+        if field not in s:
+            raise Bad(f"'secrets' is missing '{field}'")
+    for k, v in s.items():
+        if k.startswith("_"):
+            continue
+        if not isinstance(v, str) or not OP_RE.match(v):
+            # Anything that is not an op:// reference could be a literal secret
+            # pasted into the file. Refuse rather than publish it world-readable.
+            raise Bad(f"secrets.{k} must be an op://vault/item/field reference")
+
+    sel = d["selectors"]
+    if not isinstance(sel, dict):
+        raise Bad("'selectors' must be an object")
+    for k in ("user", "pass", "submit"):
+        if not isinstance(sel.get(k), str) or not sel[k].strip():
+            raise Bad(f"selectors.{k} must be a non-empty string")
+    if not isinstance(d["success"], str) or not d["success"].strip():
+        raise Bad("'success' must be a non-empty selector string")
+    d["origin"] = origin
+    return d
+
+
+def current(name: str) -> dict | None:
+    f = SITES_DIR / f"{name}.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def confirm(lines: list[str]) -> bool:
+    try:
+        tty = open("/dev/tty", "r+")
+    except OSError:
+        print("no terminal to confirm on; run this yourself, in your own terminal", file=sys.stderr)
+        return False
+    with tty:
+        tty.write("\n".join(lines) + "\n\nPublish? Type the site name to confirm: ")
+        tty.flush()
+        return tty.readline().strip()
+
+
+def write_root_file(name: str, raw: bytes) -> None:
+    fd, tmp = tempfile.mkstemp(dir=SITES_DIR, prefix=f".{name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        os.chown(tmp, 0, 0)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, SITES_DIR / f"{name}.json")
+    except BaseException:
+        pathlib.Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def cmd_add(path: str) -> int:
+    src = pathlib.Path(path).expanduser()
+    if not src.is_file() or src.is_symlink():
+        print(f"not a regular file: {src}", file=sys.stderr); return 1
+    name = src.name[:-5] if src.name.endswith(".json") else ""
+    if not name:
+        print("expected a <site>.json file", file=sys.stderr); return 1
+    raw = src.read_bytes()
+    try:
+        d = validate(name, raw)
+    except Bad as e:
+        print(f"REFUSED {name}: {e}", file=sys.stderr); return 1
+
+    old = current(name)
+    lines = [f"site      : {name}  ({'REPLACES existing' if old else 'new'})",
+             f"origin    : {d['origin']}",
+             f"login_url : {d['login_url']}"]
+    lines += [f"secret    : {k} <- {v}" for k, v in d["secrets"].items() if not k.startswith("_")]
+    if old:
+        old_origin = str(old.get("origin", "")).lower().rstrip("/")
+        if old_origin != d["origin"]:
+            lines.append(f"!! ORIGIN CHANGES from {old_origin} -- credentials would now be typed at the new host")
+        old_refs = old.get("secrets", old.get("pass", {}))
+        if {k: v for k, v in old_refs.items() if not k.startswith("_")} != \
+           {k: v for k, v in d["secrets"].items() if not k.startswith("_")}:
+            lines.append("!! SECRET REFERENCES CHANGE -- check them against 1Password")
+        if raw == (SITES_DIR / f"{name}.json").read_bytes():
+            print(f"unchanged: {name} is already published as-is"); return 0
+    if confirm(lines) != name:
+        print("not confirmed; nothing published", file=sys.stderr); return 1
+    write_root_file(name, raw)
+    print(f"published {SITES_DIR / (name + '.json')} (root:root 644). No restart needed.")
+    return 0
+
+
+def cmd_remove(name: str) -> int:
+    f = SITES_DIR / f"{name}.json"
+    if not NAME_RE.match(name) or not f.is_file():
+        print(f"no such site: {name}", file=sys.stderr); return 1
+    if confirm([f"REMOVE site {name} ({current(name).get('origin', '?') if current(name) else '?'})"]) != name:
+        print("not confirmed; nothing removed", file=sys.stderr); return 1
+    f.unlink()
+    print(f"removed {f}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="secure-browser-add-site", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("file", nargs="?", help="sites.d/<site>.json to publish")
+    g.add_argument("--remove", metavar="SITE")
+    a = ap.parse_args()
+    if os.geteuid() != 0:
+        print("run with sudo: sudo secure-browser-add-site <file>", file=sys.stderr); return 1
+    if not SITES_DIR.is_dir():
+        print(f"{SITES_DIR} missing; run setup/install.sh first", file=sys.stderr); return 1
+    return cmd_remove(a.remove) if a.remove else cmd_add(a.file)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

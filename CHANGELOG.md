@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-17
+
+- **`secure-browser-add-site`.** Publishing a site file no longer needs the full installer.
+  `sudo secure-browser-add-site sites.d/<site>.json` validates one file (https origin,
+  `login_url` on that origin, `op://` references only, required selectors), shows the
+  origin and references it binds plus any origin or reference change against the
+  published copy, requires typing the site name on the terminal, and writes it
+  root:root 644 atomically. `--remove <site>` unregisters. Installed as a root-owned copy
+  in `/opt/secure-browser/bin/add-site`, linked from `/usr/local/sbin`; not in the NOPASSWD
+  rule. 1Password item changes still need no root step at all.
+
 ## 2026-10-15
 
 - **Runtime from npm, not vendored.** `mcp-tool-gate` is now a pinned npm dependency

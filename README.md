@@ -152,7 +152,8 @@ caller-side CLI alike. Defaults: `pwagent`, `browseragent`, `/opt/secure-browser
 `/srv/secure-browser-exchange`.
 
 Then add a site: copy `sites.d/EXAMPLE-ats.json.template` to `sites.d/<site>.json`, fill it
-in, create the matching Login item in the vault, and re-run the installer. Real site files
+in, create the matching Login item in the vault, and publish it with
+`sudo secure-browser-add-site sites.d/<site>.json` (no full reinstall). Real site files
 are gitignored on purpose; see `sites.d/README.md`.
 
 ## Registering the server
@@ -203,9 +204,21 @@ secure-browser clean upload.pdf        # remove it again
 `sites.d/*.json` says **where a credential gets typed**. A site file therefore carries the
 same authority as the credential itself: anyone who can edit one can point a password at a
 host they control. So the registry is installed to root-owned `/opt` alongside the
-executables, and **adding a site means re-running the installer**.
+executables, and **publishing a site needs root**.
 
-That is real friction, and it is the price of the guarantee. The same reasoning applies to
+The light path is `sudo secure-browser-add-site sites.d/<site>.json`. It validates the file
+(https origin, `login_url` on that origin, every secret an `op://` reference so a pasted
+literal password is refused), prints the origin and references it binds, makes you type the
+site name to confirm, and writes that one file root-owned. `--remove <site>` unregisters one.
+It is deliberately outside the NOPASSWD sudoers rule: your password and the confirmation
+are the human approval that a credential may be typed at that origin. The command itself is
+the frozen copy in `/opt`, so the agent session cannot edit what runs as root.
+
+The registry holds references, not credentials. The helper reads 1Password at login time,
+so adding or rotating a Login item never needs any root step; only a new or changed site
+file does. The full installer is for `bin/`, `package.json` and first-time setup.
+
+This is still friction, and it is the price of the guarantee. The same reasoning applies to
 `bin/login`: if your user could edit the script that runs as the secrets user, the boundary
 would be decorative.
 

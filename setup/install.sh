@@ -65,6 +65,8 @@ sed '1s|.*|#!/home/'"$AGENT_USER"'/.venv/bin/python3|' "$REPO/bin/login" > "$INS
 head -c 2 "$INSTALL_DIR/bin/login" | grep -q '^#!' || { echo "    FAILED: login shebang rewrite produced a non-#! first line"; exit 1; }
 cp "$REPO/bin/mcp-server"       "$INSTALL_DIR/bin/mcp-server"
 cp "$REPO/bin/secure-browser"   "$INSTALL_DIR/bin/secure-browser"
+cp "$REPO/bin/add-site"         "$INSTALL_DIR/bin/add-site"
+ln -sf "$INSTALL_DIR/bin/add-site" /usr/local/sbin/secure-browser-add-site
 ln -sf "$INSTALL_DIR/bin/secure-browser" /usr/local/bin/secure-browser
 cp "$REPO"/sites.d/*.json       "$INSTALL_DIR/sites.d/" 2>/dev/null || true
 
@@ -89,7 +91,7 @@ for f in login mcp-server secure-browser; do
   [ -x "$INSTALL_DIR/bin/$f" ] || { echo "    FAILED: $INSTALL_DIR/bin/$f is not executable"; exit 1; }
 done
 echo "    installed, root-owned: bin/, sites.d/, node_modules/ ($(cd "$INSTALL_DIR" && node -p 'require("./node_modules/mcp-tool-gate/package.json").version') gate, $(cd "$INSTALL_DIR" && node -p 'require("./node_modules/@playwright/mcp/package.json").version') @playwright/mcp)."
-echo "    Re-run this script after editing bin/, sites.d/ or package.json."
+echo "    Re-run this script after editing bin/ or package.json. For a site file alone: sudo secure-browser-add-site sites.d/<site>.json"
 
 say "4/8  sudoers rule (exact commands only, no wildcards on the binary)"
 cat > "$SUDOERS" <<SUDO

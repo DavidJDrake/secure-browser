@@ -81,6 +81,11 @@ the `op://secure-browser/<item>/<field>` references. Then the user creates that 
 `secure-browser` vault in 1Password (the vault the service account can read). The user does that
 part — this session cannot write to 1Password.
 
+Then the user publishes the file with `sudo secure-browser-add-site sites.d/<site>.json` in
+their own terminal (it needs their sudo password and a typed confirmation, so the `!` prompt
+will not work). No full reinstall. Changing or adding a 1Password item alone needs no root
+step: the helper reads 1Password at login time.
+
 ## Errors worth knowing
 
 | Symptom | Cause |

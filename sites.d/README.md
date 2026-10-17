@@ -5,7 +5,9 @@ the same authority as the credential itself. That is why:
 
 - only the template is committed; real `*.json` files are gitignored,
 - the installer copies them to the root-owned install dir, and
-- adding or changing a site means re-running `sudo bash setup/install.sh`.
+- adding or changing a site means `sudo secure-browser-add-site sites.d/<site>.json`
+  (validates, shows what it binds, asks you to type the site name, writes that one file).
+  A full `sudo bash setup/install.sh` also republishes every site file.
 
 Copy `EXAMPLE-ats.json.template` to `<site>.json`, fill in the login URL, the expected
 origin, the three selectors, a success selector (and optionally `success_cookie`), and the
