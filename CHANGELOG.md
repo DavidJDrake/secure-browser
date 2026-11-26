@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-11-25
+
+- **One-time login codes.** `login --code-wait SECONDS` (max 600) no longer gives up on an
+  emailed/SMS code prompt: it keeps the browser open on that page and waits for
+  `login.code` in the exchange, written by the new `secure-browser code <code>`. The code
+  must be 4-10 letters/digits, is typed only after the usual origin gate, is deleted as soon
+  as it is read, and a stale file from an earlier run is discarded. Before this the helper
+  closed its browser on the code page, so a code-protected site (Humble Bundle's new
+  auth.humblebundle.com flow) could never be completed. Optional `code_selector` item field.
+  Captchas are unchanged: still NEEDS-HUMAN.
+
+## 2026-10-17
+
+- **The 1Password vault is the site registry.** `sites.d/`, the site-file template and the
+  root publishing step are gone. Every Login item in the `secure-browser` vault with an
+  https website is a site; the credential is typed only on that website's host. Adding a
+  site is adding the item, with no install. `bin/login` lists the vault at login time,
+  reads credentials by item ID (renames are harmless), carries built-in knowledge for
+  LinkedIn and all Workday tenants, falls back to generic form detection (including
+  two-step forms), and accepts optional plain-text hint fields on the item. A short-lived
+  `secure-browser-add-site` command was written and dropped in the same day in favour of
+  this. `secure-browser sites`/`status` now ask the helper for the vault listing, and the
+  CLI passes `--check-secrets` through.
+
 ## 2026-10-15
 
 - **Runtime from npm, not vendored.** `mcp-tool-gate` is now a pinned npm dependency

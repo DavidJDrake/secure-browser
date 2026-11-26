@@ -67,7 +67,6 @@ code-execution tool upstream could not reach the vault.
 secure-browser/
   bin/            login helper, MCP server launcher, caller-side CLI
   package.json    pinned runtime (Playwright MCP server + mcp-tool-gate), installed by the installer
-  sites.d/        one JSON per site: login URL, expected origin, selectors, secret refs
   hooks/          PreToolUse guard that denies the unscoped Playwright server
   setup/          privileged installer (run by a human)
   claude/         the skill, the CLAUDE.md section and the hook registration
@@ -151,9 +150,10 @@ Names and paths are overridable with `SECURE_BROWSER_AGENT_USER`, `SECURE_BROWSE
 caller-side CLI alike. Defaults: `pwagent`, `browseragent`, `/opt/secure-browser`,
 `/srv/secure-browser-exchange`.
 
-Then add a site: copy `sites.d/EXAMPLE-ats.json.template` to `sites.d/<site>.json`, fill it
-in, create the matching Login item in the vault, and re-run the installer. Real site files
-are gitignored on purpose; see `sites.d/README.md`.
+Then add a site: **create a Login item in the `secure-browser` vault** with the username,
+the password and the site's website. That is the whole step. No file, no install, no
+restart: the helper lists the vault at every login. `secure-browser sites` shows what it
+sees.
 
 ## Registering the server
 
@@ -192,22 +192,43 @@ still valid it reports `existing session reused` without touching the credential
 ```bash
 secure-browser status                  # what is installed and what is not
 secure-browser login <site>            # OK / FAILED / NEEDS-HUMAN, one line
-secure-browser login <site> --check-secrets   # prove the store path; nothing is typed
+secure-browser login <site> --check-secrets   # resolve the item; nothing is typed
+secure-browser login <site> --code-wait 300   # on an emailed/SMS code prompt, wait for the code
+secure-browser code 123456             # hand that code to the waiting login
 secure-browser put ./upload.pdf        # stage a file for upload, prints the path
 secure-browser ls                      # what is staged
 secure-browser clean upload.pdf        # remove it again
 ```
 
-## Why the registry is not editable by your normal user
+## Why the vault is the registry
 
-`sites.d/*.json` says **where a credential gets typed**. A site file therefore carries the
-same authority as the credential itself: anyone who can edit one can point a password at a
-host they control. So the registry is installed to root-owned `/opt` alongside the
-executables, and **adding a site means re-running the installer**.
+What matters for safety is **where a credential gets typed**, because anyone who can choose
+that host can collect the password. Earlier versions kept that binding in root-owned site
+files, so every new site needed a root step.
 
-That is real friction, and it is the price of the guarantee. The same reasoning applies to
-`bin/login`: if your user could edit the script that runs as the secrets user, the boundary
-would be decorative.
+The binding now lives on the 1Password item itself: the credential is typed only on the
+host(s) in the item's website field (exact host, or that host with `www.`), over https,
+the same rule 1Password's own autofill applies. Only the vault owner can write items; the
+helper's service account is read-only, and the calling session cannot read its token. So
+nothing the agent can touch can point a credential at a new host, and **putting the
+credential in the vault is the entire act of adding a site.**
+
+How a login is driven, most specific first:
+
+1. optional plain-text fields on the item (`login_url`, `username_selector`,
+   `password_selector`, `submit_selector`, `success_selector`, `success_cookie`), for the
+   rare site the defaults cannot handle. A `login_url` off the item's host is refused;
+2. built-in platform knowledge in `bin/login` (LinkedIn, and every `*.myworkdayjobs.com`
+   tenant, whose login URL is derived from the item's career-site URL);
+3. generic detection: the usual username/email field, the password field, the submit
+   button or Enter, a hidden form behind a "Sign in" control, and two-step forms.
+
+Name a site by its title slug (`Workday - Pluralsight` → `workday-pluralsight`), by a host
+on its website, or by a URL. Items without an https website are skipped and listed as such.
+
+The code is still root-owned: if your user could edit the script that runs as the secrets
+user, the boundary would be decorative. Re-run the installer only when `bin/` or
+`package.json` changes.
 
 ## Error taxonomy
 
@@ -217,7 +238,8 @@ would be decorative.
 |---|---|
 | `OK <site>: existing session reused` | cookies still valid; no credential was touched |
 | `OK <site>: signed in, session saved` | credential used, session persisted |
-| `NEEDS-HUMAN <site>: ...` | captcha, MFA or an interstitial. Stop and tell the user; do not attempt it |
+| `NEEDS-HUMAN <site>: ...` | captcha, MFA or an interstitial. Stop and tell the user; do not attempt it. For an emailed/SMS code, re-run with `--code-wait` (below) |
+| `WAITING <site>: code prompt ...` (stderr, with `--code-wait`) | the browser is held open on the code page; the user reads the code and it goes in via `secure-browser code <code>` |
 | `FAILED <site>: origin mismatch ...` | the page was not where it should be. **Nothing was typed.** Treat as hostile, do not retry blind |
 | `FAILED <site>: no item or field at 'op://...'` | vault, item title or field name does not match 1Password, or the service account cannot read that vault |
 | `FAILED <site>: 1Password rejected the service-account token` | token revoked, mistyped, or not granted this vault; create a new one and re-run the installer |
