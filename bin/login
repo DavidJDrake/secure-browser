@@ -2,7 +2,7 @@
 """secure-browser login helper. Runs AS the secrets user.
 
     login --list
-    login <site> [--headed] [--check-secrets]
+    login <site> [--headed] [--check-secrets] [--code-wait SECONDS]
 
 <site> is a Login item in the 1Password vault, named by its title slug
 ("Workday - Pluralsight" -> workday-pluralsight), by a host on its website
@@ -31,10 +31,19 @@ Guarantees this file exists to provide:
     Anything else aborts. A redirect elsewhere is treated as hostile.
   * Nothing the caller passes can widen that: the caller only picks an item.
 
+Emailed / SMS login codes (--code-wait): when a site stops on a one-time-code
+prompt, the helper keeps its browser open and waits up to SECONDS for a file
+named login.code to appear in the exchange (write it with `secure-browser code
+<code>`). The code is not a stored secret - it is single-use, short-lived, and
+supplied by the human who received it - so it may pass through the caller.
+It is still typed only after the same origin gate, must look like a code
+(4-10 letters/digits), and the file is deleted as soon as it is read. Captchas
+are never handled this way.
+
 How a login is driven, most specific first:
   1. optional text fields on the item itself (labels: login_url,
      username_selector, password_selector, submit_selector, success_selector,
-     success_cookie) - never needed for ordinary sites;
+     success_cookie, code_selector) - never needed for ordinary sites;
   2. built-in platform knowledge below (LinkedIn, every Workday tenant);
   3. generic detection: the usual username/email field, the password field,
      the submit button or Enter, with two-step (username, then password) forms
@@ -49,6 +58,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 from urllib.parse import urlparse
 
 # Defaults match setup/install.sh. sudo strips the environment, so in practice
@@ -60,7 +70,7 @@ OP_TIMEOUT = 40                      # op goes over the network
 OP_TOKEN_FILE = pathlib.Path.home() / ".config" / "op" / "service-token"
 
 HINT_FIELDS = ("login_url", "username_selector", "password_selector", "submit_selector",
-               "success_selector", "success_cookie")
+               "success_selector", "success_cookie", "code_selector")
 
 GENERIC_USER = ("input[autocomplete=username], input[type=email], input[name*=email i], "
                 "input[id*=email i], input[name*=user i], input[id*=user i], input[name*=login i]")
@@ -70,7 +80,15 @@ GENERIC_SUBMIT = ["button[type=submit]", "input[type=submit]",
 GENERIC_REVEAL = ["role=button[name=/^\\s*(sign ?in|log ?in)\\s*$/i]",
                   "role=link[name=/^\\s*(sign ?in|log ?in)\\s*$/i]"]
 HUMAN_SIGNALS = ["captcha", "verification code", "verify your", "two-step", "one-time",
-                 "security check", "authenticator"]
+                 "security check", "authenticator", "login code", "security code"]
+# The subset that means "type the code we sent you" - eligible for --code-wait.
+CODE_SIGNALS = {"verification code", "two-step", "one-time", "authenticator", "login code",
+                "security code"}
+CODE_FILE = EXCHANGE / "login.code"
+CODE_RE = re.compile(r"[A-Za-z0-9]{4,10}")
+CODE_INPUT = ("input[autocomplete=one-time-code], input[name*=code i], input[id*=code i], "
+              "input[name*=otp i], input[id*=otp i], input[inputmode=numeric], input[type=tel]")
+CODE_WAIT_MAX = 600
 LOGINISH = re.compile(r"(log-?in|sign-?in|signin|auth|/uas/)", re.I)
 
 
@@ -275,7 +293,7 @@ def origin_ok(url: str, hosts: list[str]) -> bool:
     return p.scheme == "https" and any(host_match(h, x) for x in hosts)
 
 
-def run(name: str, site: dict, headed: bool) -> str:
+def run(name: str, site: dict, headed: bool, code_wait: int = 0) -> str:
     try:
         from playwright.sync_api import sync_playwright, Error as PWError
     except ImportError:
@@ -389,6 +407,49 @@ def run(name: str, site: dict, headed: bool) -> str:
                 elif field is not None:
                     field.press("Enter")
 
+            def wait_for_code() -> str | None:
+                deadline = time.monotonic() + code_wait
+                while time.monotonic() < deadline:
+                    if CODE_FILE.exists():
+                        try:
+                            raw = CODE_FILE.read_text()[:64]
+                        finally:
+                            CODE_FILE.unlink(missing_ok=True)
+                        return re.sub(r"[\s-]", "", raw)
+                    page.wait_for_timeout(2000)      # keeps the page (and its flow) alive
+                return None
+
+            def finish_with_code(where: str) -> str:
+                CODE_FILE.unlink(missing_ok=True)    # never use a code left over from an earlier run
+                print(f"WAITING {name}: code prompt - run `secure-browser code <code>` within "
+                      f"{code_wait}s", file=sys.stderr, flush=True)
+                code = wait_for_code()
+                if code is None:
+                    raise NeedsHuman(f"code prompt, but no code arrived within {code_wait}s {where}")
+                if not CODE_RE.fullmatch(code):
+                    raise Fail("login.code did not hold a 4-10 character letter/digit code - nothing typed")
+                gate("before entering the code")
+                code_sel = cfg.get("code_selector", CODE_INPUT)
+                box = first_visible(code_sel)
+                if box is None:
+                    f = shot("no-code-field")
+                    raise NeedsHuman("code prompt has no recognisable input; add a code_selector field "
+                                     "to the item" + (f" (screenshot: {f})" if f else ""))
+                box.click(timeout=10000)
+                page.keyboard.type(code, delay=120)  # works for one field or one box per digit
+                page.wait_for_timeout(3000)
+                if first_visible(code_sel) is not None and origin_ok(page.url, hosts):
+                    submit(box)                      # many forms auto-submit on the last digit
+                for _ in range(6):
+                    page.wait_for_timeout(4000)
+                    if not origin_ok(page.url, hosts) and "challenge" not in page.url.lower():
+                        raise Fail(f"post-code redirect to {urlparse(page.url).netloc} - session not saved")
+                    if signed_in():
+                        return save("signed in with one-time code, session saved")
+                f = shot("after-code")
+                raise Fail("code entered but not signed in - wrong or expired code? request a new one "
+                           f"(url: {page.url}" + (f"; screenshot: {f})" if f else ")"))
+
             # ---- origin gate: nothing is typed before this passes ----
             gate("before typing")
             step = "filling the username field"
@@ -430,6 +491,8 @@ def run(name: str, site: dict, headed: bool) -> str:
             content = (page.content() or "").lower()
             for pat in HUMAN_SIGNALS:
                 if pat in content:
+                    if code_wait and pat in CODE_SIGNALS:
+                        return finish_with_code(where)
                     raise NeedsHuman(f"site is asking for '{pat}' - a human must complete this once {where}")
             raise Fail(f"login did not reach a signed-in page {where}")
         finally:
@@ -441,6 +504,9 @@ def main() -> int:
     ap.add_argument("site", nargs="?")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--code-wait", type=int, default=0, metavar="SECONDS",
+                    help=f"on a one-time-code prompt, wait up to SECONDS (max {CODE_WAIT_MAX}) for "
+                         f"{CODE_FILE} instead of stopping")
     ap.add_argument("--check-secrets", action="store_true",
                     help="resolve the item's username and password and report only their lengths; "
                          "nothing is typed and no browser is launched")
@@ -461,7 +527,7 @@ def main() -> int:
             parts = [f"{f} resolved ({len(secret(site['id'], f))} chars)" for f in ("username", "password")]
             print(f"OK {label}: " + "; ".join(parts) + f"; allowed hosts {', '.join(site['hosts'])}")
             return 0
-        print(run(label, site, a.headed))
+        print(run(label, site, a.headed, max(0, min(a.code_wait, CODE_WAIT_MAX))))
         return 0
     except NeedsHuman as e:
         print(f"NEEDS-HUMAN {label}: {e}", file=sys.stderr)

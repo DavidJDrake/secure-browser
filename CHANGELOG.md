@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-25
+
+- **One-time login codes.** `login --code-wait SECONDS` (max 600) no longer gives up on an
+  emailed/SMS code prompt: it keeps the browser open on that page and waits for
+  `login.code` in the exchange, written by the new `secure-browser code <code>`. The code
+  must be 4-10 letters/digits, is typed only after the usual origin gate, is deleted as soon
+  as it is read, and a stale file from an earlier run is discarded. Before this the helper
+  closed its browser on the code page, so a code-protected site (Humble Bundle's new
+  auth.humblebundle.com flow) could never be completed. Optional `code_selector` item field.
+  Captchas are unchanged: still NEEDS-HUMAN.
+
 ## 2026-10-17
 
 - **The 1Password vault is the site registry.** `sites.d/`, the site-file template and the

@@ -55,6 +55,14 @@ routine — just call it again.
 If it returns `FAILED ... needs human`, the site is asking for something only the user can
 supply (a captcha, a device confirmation). Report that and stop; do not attempt to solve it.
 
+**Emailed or SMS login codes.** If the NEEDS-HUMAN reason is a verification / one-time /
+login code, ask the user whether to proceed, then run the login in the background with
+`--code-wait 300` and tell them a code is on its way. The helper keeps its browser open on
+the code page. When the user sends the code, run `secure-browser code <code>`; the login
+then finishes with `OK ... signed in with one-time code`. The code is single-use and the
+user hands it over deliberately, so it may pass through this session. Passwords never do.
+Captchas are still never attempted.
+
 ## File exchange
 
 Both users can read and write the exchange directory (`/srv/secure-browser-exchange` by
@@ -88,7 +96,7 @@ typed only on the host in the item's website field, over https.
 - If a login fails because the website field is wrong (e.g. `myworkdayjobs.com` instead of
   the tenant host), ask the user to set it to the full URL of the page they sign in on.
 - For an unusual site, the user can add plain-text fields to the item: `login_url`,
-  `username_selector`, `password_selector`, `submit_selector`, `success_selector`,
+  `username_selector`, `password_selector`, `submit_selector`, `success_selector`, `code_selector`,
   `success_cookie`. LinkedIn and every Workday tenant are built in and need none.
 - Creating accounts on a site is the user's job; this session cannot write to 1Password.
 

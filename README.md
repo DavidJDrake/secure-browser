@@ -193,6 +193,8 @@ still valid it reports `existing session reused` without touching the credential
 secure-browser status                  # what is installed and what is not
 secure-browser login <site>            # OK / FAILED / NEEDS-HUMAN, one line
 secure-browser login <site> --check-secrets   # resolve the item; nothing is typed
+secure-browser login <site> --code-wait 300   # on an emailed/SMS code prompt, wait for the code
+secure-browser code 123456             # hand that code to the waiting login
 secure-browser put ./upload.pdf        # stage a file for upload, prints the path
 secure-browser ls                      # what is staged
 secure-browser clean upload.pdf        # remove it again
@@ -236,7 +238,8 @@ user, the boundary would be decorative. Re-run the installer only when `bin/` or
 |---|---|
 | `OK <site>: existing session reused` | cookies still valid; no credential was touched |
 | `OK <site>: signed in, session saved` | credential used, session persisted |
-| `NEEDS-HUMAN <site>: ...` | captcha, MFA or an interstitial. Stop and tell the user; do not attempt it |
+| `NEEDS-HUMAN <site>: ...` | captcha, MFA or an interstitial. Stop and tell the user; do not attempt it. For an emailed/SMS code, re-run with `--code-wait` (below) |
+| `WAITING <site>: code prompt ...` (stderr, with `--code-wait`) | the browser is held open on the code page; the user reads the code and it goes in via `secure-browser code <code>` |
 | `FAILED <site>: origin mismatch ...` | the page was not where it should be. **Nothing was typed.** Treat as hostile, do not retry blind |
 | `FAILED <site>: no item or field at 'op://...'` | vault, item title or field name does not match 1Password, or the service account cannot read that vault |
 | `FAILED <site>: 1Password rejected the service-account token` | token revoked, mistyped, or not granted this vault; create a new one and re-run the installer |
